@@ -1,0 +1,46 @@
+# Portfolio construction and risk configuration
+
+account:
+  capital: 5000
+  vol_target: 0.12          # 12% annualized (conservative for crypto)
+  max_leverage: 2.0
+
+forecast:
+  cap: 20                   # Carver standard
+  target_abs: 10            # Carver standard
+
+risk:
+  max_drawdown: 0.15        # Kill trading at 15% drawdown
+  daily_loss_limit: 0.03    # 3% daily loss limit
+  kill_switch_ratio: 1.3    # Equity/margin ratio trigger
+  max_correlation: 0.90     # Reduce positions when cross-asset corr > this
+
+position:
+  buffer_fraction: 0.10     # 10% no-trade buffer (Carver standard)
+  kelly_fraction: 0.5       # Half Kelly (never full)
+
+# Instrument weights (Phase 1: BTC only)
+instrument_weights:
+  BTC: 1.0
+
+# Instrument Diversification Multiplier
+# Phase 1: 1 instrument -> IDM = 1.0
+# Phase 3: 3 instruments -> IDM ~1.5-1.7 (calculated from correlation)
+idm: 1.0
+
+# Forecast weights (Phase 1: single rule = 1.0)
+forecast_weights:
+  ewmac_16_64: 1.0
+
+# Forecast Diversification Multiplier
+# Phase 1: 1 rule -> FDM = 1.0
+# Phase 2: multiple rules -> FDM > 1.0 (calculated from correlation)
+fdm: 1.0
+
+# Cost parameters
+costs:
+  maker_fee_bps: 2.0       # Hyperliquid maker fee
+  taker_fee_bps: 5.0       # Hyperliquid taker fee
+  slippage_bps: 2.0        # Estimated slippage
+  # Speed threshold: only trade if expected forecast change > this SR cost
+  speed_limit: 0.13        # Turnover-adjusted cost in SR units

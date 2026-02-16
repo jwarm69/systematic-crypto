@@ -1,0 +1,64 @@
+# Trading rule configuration
+# Each rule outputs a forecast scaled to [-20, +20]
+
+rules:
+  # Phase 1: Single rule
+  ewmac_16_64:
+    type: "ewmac"
+    fast_span: 16
+    slow_span: 64
+    enabled: true
+    phase: 1
+
+  # Phase 2: Additional rules
+  ewmac_8_32:
+    type: "ewmac"
+    fast_span: 8
+    slow_span: 32
+    enabled: false
+    phase: 2
+
+  ewmac_32_128:
+    type: "ewmac"
+    fast_span: 32
+    slow_span: 128
+    enabled: false
+    phase: 2
+
+  carry:
+    type: "carry"
+    smooth_days: 90
+    enabled: false
+    phase: 2
+
+  breakout_20:
+    type: "breakout"
+    lookback: 20
+    enabled: false
+    phase: 2
+
+  breakout_80:
+    type: "breakout"
+    lookback: 80
+    enabled: false
+    phase: 2
+
+  momentum:
+    type: "momentum"
+    lookback: 252          # ~1 year of hourly bars
+    enabled: false
+    phase: 2
+
+  mean_reversion:
+    type: "mean_reversion"
+    lookback: 20
+    z_entry: 2.0
+    z_exit: 0.5
+    enabled: false
+    phase: 2
+
+# Forecast scaling parameters (Carver standard)
+forecast_scaling:
+  cap: 20                 # Max absolute forecast
+  target_abs: 10          # Target average absolute forecast
+  scalar_lookback: 250    # Days for computing scalar

@@ -1,0 +1,26 @@
+# Paper trading configuration for Hyperliquid testnet
+
+exchange:
+  name: "hyperliquid"
+  testnet: true
+  # API keys loaded from environment variables:
+  #   HYPERLIQUID_API_KEY
+  #   HYPERLIQUID_API_SECRET
+  #   HYPERLIQUID_WALLET_ADDRESS
+
+trading:
+  mode: "paper"                # paper or live
+  instruments: ["BTC"]         # Phase 1: BTC only
+  timeframe: "1h"              # Primary timeframe
+
+schedule:
+  forecast_interval_hours: 1   # Recalculate forecasts every hour
+  carry_interval_hours: 8      # Update carry signal every 8 hours
+  rebalance_interval_hours: 24 # Full rebalance daily
+  data_lookback_bars: 5000     # Bars of history to maintain
+
+logging:
+  level: "INFO"
+  file: "logs/paper_trading.log"
+  trade_log: "logs/trades.csv"
+  state_file: "data/system_state.json"

@@ -1,0 +1,36 @@
+# Instrument definitions for systematic crypto trading
+# Phase 1: BTC only. Phase 3 adds ETH, SOL.
+
+instruments:
+  BTC:
+    symbol: "BTC/USDC:USDC"        # CCXT unified symbol for Hyperliquid
+    exchange: "hyperliquid"
+    asset_class: "crypto_perp"
+    point_value: 1.0                # 1 contract = 1 USD notional on Hyperliquid
+    min_order_size: 0.001           # Minimum BTC order
+    tick_size: 0.1                  # Price tick
+    description: "Bitcoin perpetual future"
+
+  ETH:
+    symbol: "ETH/USDC:USDC"
+    exchange: "hyperliquid"
+    asset_class: "crypto_perp"
+    point_value: 1.0
+    min_order_size: 0.01
+    tick_size: 0.01
+    description: "Ethereum perpetual future"
+
+  SOL:
+    symbol: "SOL/USDC:USDC"
+    exchange: "hyperliquid"
+    asset_class: "crypto_perp"
+    point_value: 1.0
+    min_order_size: 0.1
+    tick_size: 0.001
+    description: "Solana perpetual future"
+
+# Timeframes for data fetching
+timeframes:
+  primary: "1h"                    # Main trading timeframe
+  secondary: "4h"                  # Slower rules
+  daily: "1d"                      # Carry, daily metrics
