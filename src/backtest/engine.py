@@ -7,7 +7,6 @@ Adapted from crypto_momo/momo/backtest.py with Carver-specific enhancements:
 """
 
 import logging
-from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -17,6 +16,34 @@ from ..portfolio.position_sizing import carver_position_size
 from ..portfolio.buffering import apply_buffer
 
 logger = logging.getLogger(__name__)
+
+
+def periods_per_year_from_timeframe(timeframe: str) -> float:
+    """Approximate number of bars per year for common timeframes."""
+    mapping = {
+        "1m": 365 * 24 * 60,
+        "5m": 365 * 24 * 12,
+        "15m": 365 * 24 * 4,
+        "30m": 365 * 24 * 2,
+        "1h": 365 * 24,
+        "4h": 365 * 6,
+        "1d": 365,
+    }
+    return float(mapping.get(timeframe, 365 * 24))
+
+
+def timeframe_hours(timeframe: str) -> float:
+    """Return bar duration in hours for common timeframes."""
+    mapping = {
+        "1m": 1.0 / 60.0,
+        "5m": 5.0 / 60.0,
+        "15m": 15.0 / 60.0,
+        "30m": 30.0 / 60.0,
+        "1h": 1.0,
+        "4h": 4.0,
+        "1d": 24.0,
+    }
+    return float(mapping.get(timeframe, 1.0))
 
 
 class BacktestEngine:
@@ -31,7 +58,9 @@ class BacktestEngine:
         slippage_bps: float = 2.0,
         buffer_fraction: float = 0.10,
         max_leverage: float = 2.0,
-        annualization: float = np.sqrt(365 * 24),
+        timeframe: str = "1h",
+        bars_per_year: float | None = None,
+        funding_bps_per_8h: float = 0.0,
     ):
         self.capital = capital
         self.vol_target = vol_target
@@ -40,13 +69,17 @@ class BacktestEngine:
         self.slippage_bps = slippage_bps
         self.buffer_fraction = buffer_fraction
         self.max_leverage = max_leverage
-        self.annualization = annualization
+        self.timeframe = timeframe
+        self.bars_per_year = bars_per_year or periods_per_year_from_timeframe(timeframe)
+        self.annualization = np.sqrt(self.bars_per_year)
+        self.funding_bps_per_8h = funding_bps_per_8h
 
     def run(
         self,
         prices: pd.Series,
         forecasts: pd.Series,
         vol_span: int = 25,
+        funding_rates: pd.Series | None = None,
     ) -> dict:
         """Run backtest for a single instrument.
 
@@ -54,6 +87,7 @@ class BacktestEngine:
             prices: Close price series (DatetimeIndex)
             forecasts: Forecast series scaled to [-20, +20]
             vol_span: EWMA vol span
+            funding_rates: Optional per-bar funding rates (decimal, signed)
 
         Returns:
             Dict with portfolio_value, positions, metrics, etc.
@@ -114,14 +148,31 @@ class BacktestEngine:
         cost_bps = self.taker_fee_bps + self.slippage_bps
         transaction_costs = trade_notional * (cost_bps / 10000)
 
+        # Funding PnL
+        if funding_rates is not None:
+            aligned_funding = funding_rates.reindex(common_idx).fillna(0.0)
+            # Positive funding means longs pay, shorts receive.
+            funding_pnl = -(positions.shift(1) * prices.shift(1) * aligned_funding).fillna(0.0)
+        else:
+            funding_rate_per_bar = (self.funding_bps_per_8h / 10000.0) * (
+                timeframe_hours(self.timeframe) / 8.0
+            )
+            funding_pnl = -(positions.shift(1).abs() * prices.shift(1) * funding_rate_per_bar).fillna(0.0)
+
         # Net PnL
-        net_pnl = gross_pnl - transaction_costs
+        net_pnl = gross_pnl - transaction_costs + funding_pnl
 
         # Portfolio value
         portfolio_value = self.capital + net_pnl.cumsum()
 
         # Metrics
-        metrics = self._compute_metrics(portfolio_value, net_pnl, positions, transaction_costs)
+        metrics = self._compute_metrics(
+            portfolio_value,
+            net_pnl,
+            positions,
+            transaction_costs,
+            funding_pnl,
+        )
 
         return {
             "portfolio_value": portfolio_value,
@@ -132,6 +183,7 @@ class BacktestEngine:
             "gross_pnl": gross_pnl,
             "net_pnl": net_pnl,
             "transaction_costs": transaction_costs,
+            "funding_pnl": funding_pnl,
             "metrics": metrics,
         }
 
@@ -141,6 +193,7 @@ class BacktestEngine:
         net_pnl: pd.Series,
         positions: pd.Series,
         transaction_costs: pd.Series,
+        funding_pnl: pd.Series,
     ) -> dict:
         """Compute comprehensive performance metrics."""
         returns = portfolio_value.pct_change().dropna()
@@ -148,9 +201,9 @@ class BacktestEngine:
         if len(returns) == 0 or returns.std() == 0:
             return {"sharpe_ratio": 0, "total_return": 0, "max_drawdown": 0}
 
-        # Annualize based on bars per year
-        bars_per_year = 365 * 24  # hourly crypto
-        ann_factor = np.sqrt(bars_per_year)
+        # Annualize based on configured timeframe
+        bars_per_year = self.bars_per_year
+        ann_factor = self.annualization
 
         total_return = (portfolio_value.iloc[-1] / portfolio_value.iloc[0]) - 1
         ann_return = (1 + total_return) ** (bars_per_year / len(returns)) - 1
@@ -166,6 +219,7 @@ class BacktestEngine:
         position_changes = positions.diff().abs()
         avg_turnover = position_changes.mean()
         total_costs = transaction_costs.sum()
+        total_funding_pnl = funding_pnl.sum()
 
         # Win rate (per bar)
         win_rate = (net_pnl > 0).sum() / (net_pnl != 0).sum() if (net_pnl != 0).sum() > 0 else 0
@@ -195,6 +249,8 @@ class BacktestEngine:
             "profit_factor": profit_factor,
             "avg_turnover": avg_turnover,
             "total_costs": total_costs,
+            "total_funding_pnl": total_funding_pnl,
             "final_value": portfolio_value.iloc[-1],
             "n_bars": len(returns),
+            "bars_per_year": bars_per_year,
         }

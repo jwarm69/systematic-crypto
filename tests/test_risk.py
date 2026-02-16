@@ -62,3 +62,23 @@ class TestRiskManager:
         should_reduce, reasons = self.rm.check_all(9500)
         assert should_reduce
         assert "Kill switch previously triggered" in reasons
+
+    def test_kill_switch_ratio_triggered_by_extreme_leverage(self):
+        positions = {"BTC/USDC:USDC": 0.3}
+        prices = {"BTC/USDC:USDC": 100000}
+        # 30k notional on 10k equity = 3.0x leverage
+        # Kill switch threshold = 2.0 * 1.3 = 2.6x
+        should_reduce, reasons = self.rm.check_all(10000, positions=positions, prices=prices)
+        assert should_reduce
+        assert self.rm.kill_switch_active
+        assert any("Kill switch leverage" in r for r in reasons)
+
+    def test_kill_switch_ratio_not_triggered_when_below_threshold(self):
+        positions = {"BTC/USDC:USDC": 0.25}
+        prices = {"BTC/USDC:USDC": 100000}
+        # 2.5x leverage breaches max_leverage but is below kill switch threshold 2.6x
+        should_reduce, reasons = self.rm.check_all(10000, positions=positions, prices=prices)
+        assert should_reduce
+        assert not self.rm.kill_switch_active
+        assert any("Leverage" in r for r in reasons)
+        assert not any("Kill switch leverage" in r for r in reasons)

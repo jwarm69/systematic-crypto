@@ -4,7 +4,7 @@ Adapted from crypto_momo/momo/risk.py with Carver-specific enhancements.
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 import numpy as np
 import pandas as pd
@@ -42,7 +42,20 @@ class RiskManager:
     def reset_daily(self, equity: float) -> None:
         """Reset daily tracking (call at start of each trading day)."""
         self.daily_start_equity = equity
-        self._last_daily_reset = datetime.now()
+        self._last_daily_reset = datetime.now(timezone.utc)
+
+    def maybe_reset_daily(self, equity: float, now: datetime | None = None) -> bool:
+        """Reset daily baseline if this is the first run or a new UTC day.
+
+        Returns:
+            True if a reset occurred, False otherwise
+        """
+        now_utc = now or datetime.now(timezone.utc)
+        if self._last_daily_reset is None or self._last_daily_reset.date() != now_utc.date():
+            self.daily_start_equity = equity
+            self._last_daily_reset = now_utc
+            return True
+        return False
 
     def check_drawdown(self, equity: float) -> tuple[bool, str]:
         """Check if drawdown limit is breached.
@@ -106,6 +119,37 @@ class RiskManager:
             return True, reason
         return False, ""
 
+    def check_kill_switch_ratio(
+        self,
+        positions: dict[str, float],
+        prices: dict[str, float],
+        equity: float,
+    ) -> tuple[bool, str]:
+        """Trigger kill switch if leverage is far beyond configured limits.
+
+        This uses `kill_switch_ratio` as an escalation multiplier above
+        `max_leverage`.
+        """
+        if equity <= 0:
+            self.kill_switch_active = True
+            return True, "Kill switch: zero or negative equity"
+
+        total_notional = sum(
+            abs(pos) * prices.get(sym, 0) for sym, pos in positions.items()
+        )
+        leverage = total_notional / equity
+        kill_switch_leverage = self.max_leverage * self.kill_switch_ratio
+
+        if leverage > kill_switch_leverage:
+            reason = (
+                f"Kill switch leverage {leverage:.1f}x exceeds trigger "
+                f"{kill_switch_leverage:.1f}x"
+            )
+            logger.critical(f"KILL SWITCH: {reason}")
+            self.kill_switch_active = True
+            return True, reason
+        return False, ""
+
     def check_all(
         self,
         equity: float,
@@ -137,6 +181,9 @@ class RiskManager:
             lev_breach, lev_reason = self.check_leverage(positions, prices, equity)
             if lev_breach:
                 reasons.append(lev_reason)
+            ks_breach, ks_reason = self.check_kill_switch_ratio(positions, prices, equity)
+            if ks_breach:
+                reasons.append(ks_reason)
 
         return len(reasons) > 0, reasons
 

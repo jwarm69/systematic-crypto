@@ -2,7 +2,7 @@
 # Each rule outputs a forecast scaled to [-20, +20]
 
 rules:
-  # Phase 1: Single rule
+  # Phase 1: EWMAC variants (trend-following group)
   ewmac_16_64:
     type: "ewmac"
     fast_span: 16
@@ -10,51 +10,53 @@ rules:
     enabled: true
     phase: 1
 
-  # Phase 2: Additional rules
   ewmac_8_32:
     type: "ewmac"
     fast_span: 8
     slow_span: 32
-    enabled: false
+    enabled: true
     phase: 2
 
   ewmac_32_128:
     type: "ewmac"
     fast_span: 32
     slow_span: 128
-    enabled: false
+    enabled: true
     phase: 2
 
+  # Phase 2: Carry (own group - uncorrelated with trend)
   carry:
     type: "carry"
     smooth_days: 90
-    enabled: false
+    enabled: true
     phase: 2
 
+  # Phase 2: Breakout (trend-following group, correlated with EWMAC)
   breakout_20:
     type: "breakout"
     lookback: 20
-    enabled: false
+    enabled: true
     phase: 2
 
   breakout_80:
     type: "breakout"
     lookback: 80
-    enabled: false
+    enabled: true
     phase: 2
 
+  # Phase 2: Momentum (trend-following group)
   momentum:
     type: "momentum"
-    lookback: 252          # ~1 year of hourly bars
-    enabled: false
+    lookback: 252
+    enabled: true
     phase: 2
 
+  # Phase 2: Mean reversion (own group - negatively correlated with trend)
   mean_reversion:
     type: "mean_reversion"
     lookback: 20
-    z_entry: 2.0
-    z_exit: 0.5
-    enabled: false
+    z_cap: 3.0
+    enabled: true
     phase: 2
 
 # Forecast scaling parameters (Carver standard)

@@ -28,14 +28,18 @@ instrument_weights:
 # Phase 3: 3 instruments -> IDM ~1.5-1.7 (calculated from correlation)
 idm: 1.0
 
-# Forecast weights (Phase 1: single rule = 1.0)
+# Forecast weights (Phase 2: handcrafted from correlation grouping)
+# Groups: [ewmac_32_128, momentum_252] (trend-slow), [ewmac_8_32, ewmac_16_64, breakout_80] (trend-fast)
 forecast_weights:
-  ewmac_16_64: 1.0
+  ewmac_32_128: 0.3333
+  momentum_252: 0.3333
+  ewmac_8_32: 0.1111
+  ewmac_16_64: 0.1111
+  breakout_80: 0.1111
 
 # Forecast Diversification Multiplier
-# Phase 1: 1 rule -> FDM = 1.0
-# Phase 2: multiple rules -> FDM > 1.0 (calculated from correlation)
-fdm: 1.0
+# Phase 2: computed from 5-rule forecast correlation matrix
+fdm: 1.305
 
 # Cost parameters
 costs:

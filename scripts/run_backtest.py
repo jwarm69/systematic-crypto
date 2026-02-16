@@ -32,6 +32,12 @@ def main():
     parser.add_argument("--fast-span", type=int, default=16)
     parser.add_argument("--slow-span", type=int, default=64)
     parser.add_argument("--exchange", default="hyperliquid")
+    parser.add_argument(
+        "--funding-bps-per-8h",
+        type=float,
+        default=0.0,
+        help="Constant funding assumption in bps per 8h (0 disables)",
+    )
     args = parser.parse_args()
 
     symbol = INSTRUMENT_SYMBOLS[args.instrument]
@@ -56,7 +62,12 @@ def main():
     print(f"  Current: {forecast.iloc[-1]:.2f}")
 
     # Run backtest
-    engine = BacktestEngine(capital=args.capital, vol_target=args.vol_target)
+    engine = BacktestEngine(
+        capital=args.capital,
+        vol_target=args.vol_target,
+        timeframe=args.timeframe,
+        funding_bps_per_8h=args.funding_bps_per_8h,
+    )
     results = engine.run(prices, forecast)
 
     # Print metrics
@@ -65,6 +76,7 @@ def main():
     print(f"BACKTEST RESULTS: {args.instrument} EWMAC({args.fast_span},{args.slow_span})")
     print(f"{'='*50}")
     print(f"Capital:           ${args.capital:,.0f}")
+    print(f"Timeframe:         {args.timeframe} ({m['bars_per_year']:.0f} bars/year)")
     print(f"Final Value:       ${m['final_value']:,.2f}")
     print(f"Total Return:      {m['total_return']:.1%}")
     print(f"Annualized Return: {m['annualized_return']:.1%}")
@@ -76,6 +88,7 @@ def main():
     print(f"Win Rate:          {m['win_rate']:.1%}")
     print(f"Profit Factor:     {m['profit_factor']:.2f}")
     print(f"Total Costs:       ${m['total_costs']:.2f}")
+    print(f"Funding PnL:       ${m['total_funding_pnl']:.2f}")
     print(f"Bars:              {m['n_bars']}")
     print(f"{'='*50}")
 

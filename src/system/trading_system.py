@@ -9,8 +9,6 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
-import numpy as np
-import pandas as pd
 import yaml
 
 from ..data.fetcher import fetch_and_cache
@@ -20,7 +18,12 @@ from ..indicators.volatility import current_volatility
 from ..portfolio.buffering import apply_buffer
 from ..portfolio.position_sizing import carver_position_size
 from ..risk.risk_manager import RiskManager
+from ..rules.base import AbstractTradingRule
+from ..rules.breakout import BreakoutRule
+from ..rules.carry import CarryRule
 from ..rules.ewmac import EWMACRule
+from ..rules.mean_reversion import MeanReversionRule
+from ..rules.momentum import MomentumRule
 from ..rules.scaling import combine_forecasts
 
 logger = logging.getLogger(__name__)
@@ -79,18 +82,62 @@ class TradingSystem:
         with open(path) as f:
             return yaml.safe_load(f)
 
-    def _init_rules(self) -> dict[str, EWMACRule]:
+    def _symbol_for_instrument(self, instrument: str) -> str:
+        inst_cfg = self.instruments_cfg["instruments"].get(instrument, {})
+        return inst_cfg.get("symbol", f"{instrument}/USDC:USDC")
+
+    @staticmethod
+    def _signed_position_size(position) -> float:
+        if position is None or position.size == 0:
+            return 0.0
+        return float(position.size if position.side == "long" else -position.size)
+
+    def _init_rules(self) -> dict[str, AbstractTradingRule]:
         """Initialize enabled trading rules from config."""
         rules = {}
         for rule_name, cfg in self.rules_cfg["rules"].items():
             if not cfg.get("enabled", False):
                 continue
-            if cfg["type"] == "ewmac":
+            rule_type = cfg["type"]
+            if rule_type == "ewmac":
                 rules[rule_name] = EWMACRule(
                     fast_span=cfg["fast_span"],
                     slow_span=cfg["slow_span"],
                 )
+            elif rule_type == "carry":
+                rules[rule_name] = CarryRule(smooth_days=cfg.get("smooth_days", 90))
+            elif rule_type == "breakout":
+                rules[rule_name] = BreakoutRule(lookback=cfg["lookback"])
+            elif rule_type == "momentum":
+                rules[rule_name] = MomentumRule(lookback=cfg["lookback"])
+            elif rule_type == "mean_reversion":
+                rules[rule_name] = MeanReversionRule(
+                    lookback=cfg.get("lookback", 20),
+                    z_cap=cfg.get("z_cap", 3.0),
+                )
         return rules
+
+    async def _refresh_positions_from_exchange(self, instruments: list[str]) -> None:
+        """Refresh local position cache from exchange truth for tracked instruments."""
+        try:
+            open_positions = await self.exchange.get_positions()
+        except Exception as exc:
+            logger.warning(f"Could not refresh positions from exchange: {exc}")
+            return
+
+        symbol_to_pos = {p.symbol: self._signed_position_size(p) for p in open_positions}
+        for instrument in instruments:
+            symbol = self._symbol_for_instrument(instrument)
+            self.current_positions[symbol] = symbol_to_pos.get(symbol, 0.0)
+
+    async def _sync_position_from_exchange(self, symbol: str, fallback: float) -> float:
+        """Read back a symbol position from exchange after order placement."""
+        try:
+            position = await self.exchange.get_position(symbol)
+        except Exception as exc:
+            logger.warning(f"Could not sync position for {symbol}: {exc}")
+            return fallback
+        return self._signed_position_size(position)
 
     async def run_once(self) -> dict:
         """Run one iteration of the trading loop.
@@ -102,13 +149,22 @@ class TradingSystem:
         await self.exchange.connect()
 
         try:
+            # Establish run-level equity and daily baseline before placing any orders.
+            run_ts = datetime.now(timezone.utc)
+            run_equity = await self.exchange.get_balance()
+            if self.risk_manager.maybe_reset_daily(run_equity, now=run_ts):
+                logger.info(f"Daily risk baseline reset at equity ${run_equity:,.2f}")
+
             # Get active instruments
             instruments = self.paper_cfg.get("trading", {}).get("instruments", ["BTC"])
             timeframe = self.paper_cfg.get("trading", {}).get("timeframe", "1h")
+            await self._refresh_positions_from_exchange(instruments)
+            proposed_positions = dict(self.current_positions)
+            latest_prices: dict[str, float] = {}
 
             for instrument in instruments:
                 inst_cfg = self.instruments_cfg["instruments"].get(instrument, {})
-                symbol = inst_cfg.get("symbol", f"{instrument}/USDC:USDC")
+                symbol = self._symbol_for_instrument(instrument)
 
                 # 1. Fetch data
                 logger.info(f"Fetching data for {instrument}...")
@@ -148,12 +204,14 @@ class TradingSystem:
 
                 # 4. Calculate volatility
                 vol = current_volatility(prices)
+                latest_price = float(prices.iloc[-1])
+                latest_prices[symbol] = latest_price
 
                 # 5. Calculate target position
                 inst_weight = self.portfolio_cfg.get("instrument_weights", {}).get(instrument, 1.0)
                 target_pos = carver_position_size(
                     capital=self.capital,
-                    price=prices.iloc[-1],
+                    price=latest_price,
                     instrument_vol=vol,
                     forecast=current_forecast,
                     vol_target=self.vol_target,
@@ -168,20 +226,27 @@ class TradingSystem:
                     current_position=current_pos,
                     target_position=target_pos,
                     capital=self.capital,
-                    price=prices.iloc[-1],
+                    price=latest_price,
                     instrument_vol=vol,
                     vol_target=self.vol_target,
                     buffer_fraction=self.buffer_fraction,
                 )
 
                 # 7. Risk check
+                risk_positions = dict(proposed_positions)
+                risk_positions[symbol] = buffered_pos
+
                 equity = await self.exchange.get_balance()
-                self.risk_manager.update_equity(equity)
-                should_reduce, risk_reasons = self.risk_manager.check_all(equity)
+                should_reduce, risk_reasons = self.risk_manager.check_all(
+                    equity,
+                    positions=risk_positions,
+                    prices=latest_prices,
+                )
 
                 if should_reduce:
                     logger.warning(f"Risk triggered: {risk_reasons}")
                     buffered_pos = 0.0  # Flatten
+                    risk_positions[symbol] = 0.0
 
                 # 8. Execute trade if needed
                 trade_size = buffered_pos - current_pos
@@ -192,7 +257,7 @@ class TradingSystem:
                     side = "buy" if trade_size > 0 else "sell"
                     # Update paper price before executing
                     if self.exchange.paper_mode:
-                        self.exchange.update_paper_price(symbol, prices.iloc[-1])
+                        self.exchange.update_paper_price(symbol, latest_price)
 
                     order = Order(
                         symbol=symbol,
@@ -201,7 +266,12 @@ class TradingSystem:
                     )
                     trade_result = await self.exchange.place_order(order)
                     if trade_result.success:
-                        self.current_positions[symbol] = buffered_pos
+                        synced_position = await self._sync_position_from_exchange(
+                            symbol=symbol,
+                            fallback=buffered_pos,
+                        )
+                        self.current_positions[symbol] = synced_position
+                        proposed_positions[symbol] = synced_position
                         logger.info(
                             f"TRADE: {side} {abs(trade_size):.6f} {instrument} "
                             f"@ {trade_result.filled_price:.2f}"
@@ -211,6 +281,7 @@ class TradingSystem:
                 else:
                     logger.info(f"No trade needed for {instrument} (change {trade_size:.6f} < min {min_size})")
                     self.current_positions[symbol] = current_pos
+                    proposed_positions[symbol] = current_pos
 
                 results[instrument] = {
                     "forecast": current_forecast,
@@ -220,7 +291,7 @@ class TradingSystem:
                     "current_position": current_pos,
                     "trade_size": trade_size if abs(trade_size) >= min_size else 0,
                     "trade_result": trade_result,
-                    "price": prices.iloc[-1],
+                    "price": latest_price,
                     "risk_reasons": risk_reasons if should_reduce else [],
                 }
 
