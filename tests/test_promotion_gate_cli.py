@@ -61,12 +61,8 @@ def test_promotion_gate_cli_passes_and_writes_json(tmp_path):
         "0.0",
         "--slippage-bps",
         "0.0",
-        "--min-mean-sharpe-delta",
-        "0.01",
-        "--min-outperform-fraction",
-        "0.75",
-        "--max-drawdown-worsening",
-        "1.0",
+        "--gate-profile",
+        "lenient",
         "--output-json",
         str(output),
     ]
@@ -78,6 +74,7 @@ def test_promotion_gate_cli_passes_and_writes_json(tmp_path):
     payload = json.loads(output.read_text())
     assert payload["approved"] is True
     assert len(payload["splits"]) == 4
+    assert payload["config"]["gate_profile"] == "lenient"
 
 
 def test_promotion_gate_cli_rejects_worse_candidate(tmp_path):
@@ -105,14 +102,42 @@ def test_promotion_gate_cli_rejects_worse_candidate(tmp_path):
         "0.0",
         "--slippage-bps",
         "0.0",
-        "--min-mean-sharpe-delta",
-        "0.01",
-        "--min-outperform-fraction",
-        "0.75",
-        "--max-drawdown-worsening",
-        "1.0",
     ]
 
     proc = subprocess.run(cmd, capture_output=True, text=True)
     assert proc.returncode == 2, proc.stderr + proc.stdout
     assert "Approved: False" in proc.stdout
+
+
+def test_promotion_gate_cli_uses_balanced_profile_defaults(tmp_path):
+    prices, baseline, candidate = _write_inputs(tmp_path, baseline_value=0.0, candidate_value=10.0)
+    cmd = _base_cmd() + [
+        "--prices-file",
+        str(prices),
+        "--baseline-file",
+        str(baseline),
+        "--candidate-file",
+        str(candidate),
+        "--timeframe",
+        "1h",
+        "--n-splits",
+        "4",
+        "--test-size",
+        "100",
+        "--purge",
+        "24",
+        "--embargo",
+        "24",
+        "--buffer-fraction",
+        "0.0",
+        "--taker-fee-bps",
+        "0.0",
+        "--slippage-bps",
+        "0.0",
+    ]
+
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    assert "Profile: balanced" in proc.stdout
+    assert "mean_delta>=0.080" in proc.stdout
+    assert "outperform>=80.0%" in proc.stdout

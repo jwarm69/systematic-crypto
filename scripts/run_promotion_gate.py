@@ -14,6 +14,25 @@ from src.backtest.engine import BacktestEngine
 from src.ml.guardrails import evaluate_candidate_vs_baseline, promotion_gate
 
 
+GATE_PROFILES = {
+    "lenient": {
+        "min_mean_sharpe_delta": 0.03,
+        "min_outperform_fraction": 0.70,
+        "max_drawdown_worsening": 0.05,
+    },
+    "balanced": {
+        "min_mean_sharpe_delta": 0.08,
+        "min_outperform_fraction": 0.80,
+        "max_drawdown_worsening": 0.03,
+    },
+    "strict": {
+        "min_mean_sharpe_delta": 0.15,
+        "min_outperform_fraction": 0.80,
+        "max_drawdown_worsening": 0.02,
+    },
+}
+
+
 def _read_table(path: Path) -> pd.DataFrame:
     suffix = path.suffix.lower()
     if suffix == ".parquet":
@@ -72,10 +91,16 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--test-size", type=int, default=None)
     parser.add_argument("--purge", type=int, default=0)
     parser.add_argument("--embargo", type=int, default=0)
+    parser.add_argument(
+        "--gate-profile",
+        choices=sorted(GATE_PROFILES.keys()),
+        default="balanced",
+        help="Threshold preset for promotion decision",
+    )
 
-    parser.add_argument("--min-mean-sharpe-delta", type=float, default=0.05)
-    parser.add_argument("--min-outperform-fraction", type=float, default=0.60)
-    parser.add_argument("--max-drawdown-worsening", type=float, default=0.03)
+    parser.add_argument("--min-mean-sharpe-delta", type=float, default=None)
+    parser.add_argument("--min-outperform-fraction", type=float, default=None)
+    parser.add_argument("--max-drawdown-worsening", type=float, default=None)
 
     parser.add_argument(
         "--output-json",
@@ -88,6 +113,23 @@ def _build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     parser = _build_parser()
     args = parser.parse_args()
+
+    profile = GATE_PROFILES[args.gate_profile]
+    min_mean_sharpe_delta = (
+        args.min_mean_sharpe_delta
+        if args.min_mean_sharpe_delta is not None
+        else profile["min_mean_sharpe_delta"]
+    )
+    min_outperform_fraction = (
+        args.min_outperform_fraction
+        if args.min_outperform_fraction is not None
+        else profile["min_outperform_fraction"]
+    )
+    max_drawdown_worsening = (
+        args.max_drawdown_worsening
+        if args.max_drawdown_worsening is not None
+        else profile["max_drawdown_worsening"]
+    )
 
     prices = _load_series(Path(args.prices_file), args.price_column, args.timestamp_column)
     baseline = _load_series(Path(args.baseline_file), args.baseline_column, args.timestamp_column)
@@ -120,12 +162,18 @@ def main() -> int:
     )
     decision = promotion_gate(
         evaluation=evaluation,
-        min_mean_sharpe_delta=args.min_mean_sharpe_delta,
-        min_outperform_fraction=args.min_outperform_fraction,
-        max_drawdown_worsening=args.max_drawdown_worsening,
+        min_mean_sharpe_delta=min_mean_sharpe_delta,
+        min_outperform_fraction=min_outperform_fraction,
+        max_drawdown_worsening=max_drawdown_worsening,
     )
 
     print("\n=== Model Promotion Gate ===")
+    print(
+        f"Profile: {args.gate_profile} "
+        f"(mean_delta>={min_mean_sharpe_delta:.3f}, "
+        f"outperform>={min_outperform_fraction:.1%}, "
+        f"dd_worsen<={max_drawdown_worsening:.1%})"
+    )
     print(f"Approved: {decision.approved}")
     print(f"Mean Sharpe Delta:   {decision.summary['mean_sharpe_delta']:.3f}")
     print(f"Outperform Fraction: {decision.summary['outperform_fraction']:.1%}")
@@ -154,6 +202,10 @@ def main() -> int:
                 "test_size": args.test_size,
                 "purge": args.purge,
                 "embargo": args.embargo,
+                "gate_profile": args.gate_profile,
+                "min_mean_sharpe_delta": min_mean_sharpe_delta,
+                "min_outperform_fraction": min_outperform_fraction,
+                "max_drawdown_worsening": max_drawdown_worsening,
             },
         }
         output_path = Path(args.output_json)
@@ -166,4 +218,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
