@@ -4,12 +4,40 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
 
 DATA_DIR = Path(__file__).parent.parent.parent / "data" / "raw"
+
+
+def timeframe_to_milliseconds(timeframe: str) -> int:
+    """Convert a candle timeframe string to milliseconds."""
+    mapping = {
+        "1m": 60_000,
+        "5m": 5 * 60_000,
+        "15m": 15 * 60_000,
+        "30m": 30 * 60_000,
+        "1h": 60 * 60_000,
+        "4h": 4 * 60 * 60_000,
+        "1d": 24 * 60 * 60_000,
+    }
+    if timeframe in mapping:
+        return mapping[timeframe]
+
+    if len(timeframe) < 2:
+        raise ValueError(f"Invalid timeframe: {timeframe}")
+
+    unit = timeframe[-1]
+    try:
+        value = int(timeframe[:-1])
+    except ValueError as exc:
+        raise ValueError(f"Invalid timeframe: {timeframe}") from exc
+
+    unit_ms = {"m": 60_000, "h": 60 * 60_000, "d": 24 * 60 * 60_000}
+    if unit not in unit_ms:
+        raise ValueError(f"Unsupported timeframe unit '{unit}' in {timeframe}")
+    return value * unit_ms[unit]
 
 
 def fetch_ohlcv(
@@ -41,9 +69,27 @@ def fetch_ohlcv(
 
     all_bars = []
     fetched = 0
-    batch_size = min(limit, 1000)  # Most exchanges cap at 1000 per request
+    max_batch_size = 1000  # Most exchanges cap at 1000 per request
+
+    # If since isn't given and user asks for deep history, estimate a historical
+    # starting point so pagination can walk forward and actually collect >1k bars.
+    if since_ms is None and limit > max_batch_size:
+        tf_ms = timeframe_to_milliseconds(timeframe)
+        now_ms = (
+            int(exchange.milliseconds())
+            if hasattr(exchange, "milliseconds")
+            else int(datetime.now(timezone.utc).timestamp() * 1000)
+        )
+        lookback_bars = limit + max_batch_size
+        since_ms = now_ms - (lookback_bars * tf_ms)
+        logger.info(
+            "Estimated since for deep fetch: %s (%d bars lookback)",
+            pd.to_datetime(since_ms, unit="ms", utc=True),
+            lookback_bars,
+        )
 
     while fetched < limit:
+        batch_size = min(max_batch_size, limit - fetched)
         bars = exchange.fetch_ohlcv(
             symbol, timeframe=timeframe, since=since_ms, limit=batch_size
         )
@@ -53,11 +99,19 @@ def fetch_ohlcv(
         all_bars.extend(bars)
         fetched += len(bars)
 
-        # Move since forward for pagination
-        since_ms = bars[-1][0] + 1
+        # Without an explicit since, exchanges usually return only "latest".
+        # In that mode there is no reliable backward pagination.
+        if since_ms is None:
+            break
 
         if len(bars) < batch_size:
             break  # No more data
+
+        # Move since forward for pagination
+        next_since_ms = bars[-1][0] + 1
+        if next_since_ms <= since_ms:
+            break
+        since_ms = next_since_ms
 
     if not all_bars:
         logger.warning(f"No data returned for {symbol} {timeframe}")
@@ -68,6 +122,8 @@ def fetch_ohlcv(
     df = df.set_index("timestamp")
     df = df[~df.index.duplicated(keep="last")]
     df = df.sort_index()
+    if len(df) > limit:
+        df = df.tail(limit)
 
     logger.info(f"Fetched {len(df)} bars for {symbol} {timeframe}")
     return df
@@ -175,6 +231,7 @@ def fetch_and_cache(
     Returns:
         Cleaned OHLCV DataFrame
     """
+    cached = None
     if not force_refresh:
         cached = load_parquet(symbol, timeframe)
         if cached is not None and len(cached) > 0:
@@ -189,7 +246,17 @@ def fetch_and_cache(
 
             # Fetch only new data since last cached bar
             logger.info(f"Cache stale, fetching new data since {last_bar}")
-            new_data = fetch_ohlcv(symbol, timeframe, limit=500, exchange_id=exchange_id, since=last_bar.to_pydatetime())
+            try:
+                new_data = fetch_ohlcv(
+                    symbol,
+                    timeframe,
+                    limit=500,
+                    exchange_id=exchange_id,
+                    since=last_bar.to_pydatetime(),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed incremental refresh for %s %s: %s", symbol, timeframe, exc)
+                return cached
             if not new_data.empty:
                 combined = pd.concat([cached, new_data])
                 combined = combined[~combined.index.duplicated(keep="last")]
@@ -200,7 +267,13 @@ def fetch_and_cache(
             return cached
 
     # Full fetch
-    df = fetch_ohlcv(symbol, timeframe, limit, exchange_id)
+    try:
+        df = fetch_ohlcv(symbol, timeframe, limit, exchange_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed full fetch for %s %s: %s", symbol, timeframe, exc)
+        if cached is not None and len(cached) > 0:
+            return cached
+        return pd.DataFrame()
     df = clean_ohlcv(df, timeframe)
     if not df.empty:
         save_parquet(df, symbol, timeframe)
