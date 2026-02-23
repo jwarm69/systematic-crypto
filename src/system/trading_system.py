@@ -25,6 +25,7 @@ from ..rules.ewmac import EWMACRule
 from ..rules.mean_reversion import MeanReversionRule
 from ..rules.momentum import MomentumRule
 from ..rules.scaling import combine_forecasts
+from .trade_logger import TradeLogger
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +36,7 @@ class TradingSystem:
     """Main trading system orchestrator.
 
     Loads config, runs the forecast->size->execute pipeline,
-    and manages state persistence.
+    and manages state persistence with trade logging.
     """
 
     def __init__(self, config_path: str | Path | None = None):
@@ -74,9 +75,19 @@ class TradingSystem:
             paper_mode=self.paper_cfg.get("trading", {}).get("mode", "paper") == "paper",
         )
 
+        # Trade logger
+        log_cfg = self.paper_cfg.get("logging", {})
+        self.trade_logger = TradeLogger(
+            trade_log_path=log_cfg.get("trade_log", "logs/trades.csv"),
+            pnl_history_path=log_cfg.get("pnl_history", "data/pnl_history.json"),
+            run_log_path=log_cfg.get("run_log", "data/run_history.json"),
+        )
+
         # State
         self.current_positions: dict[str, float] = {}
-        self.state_file = Path(self.paper_cfg.get("logging", {}).get("state_file", "data/system_state.json"))
+        self.state_file = Path(log_cfg.get("state_file", "data/system_state.json"))
+        self.last_forecasts: dict[str, dict[str, float]] = {}  # instrument -> {rule: value}
+        self.last_run_ts: datetime | None = None
 
     def _load_yaml(self, path: Path) -> dict:
         with open(path) as f:
@@ -153,6 +164,7 @@ class TradingSystem:
             Dict with forecasts, positions, trades executed
         """
         results = {}
+        run_start = datetime.now(timezone.utc)
         await self.exchange.connect()
 
         try:
@@ -161,6 +173,17 @@ class TradingSystem:
             run_equity = await self.exchange.get_balance()
             if self.risk_manager.maybe_reset_daily(run_equity, now=run_ts):
                 logger.info(f"Daily risk baseline reset at equity ${run_equity:,.2f}")
+
+                # Log daily PnL on reset
+                if self.last_run_ts is not None:
+                    prev_equity = self.risk_manager.daily_start_equity
+                    self.trade_logger.log_daily_pnl(
+                        date=run_ts.strftime("%Y-%m-%d"),
+                        equity=run_equity,
+                        pnl=run_equity - prev_equity if prev_equity > 0 else 0,
+                        positions=dict(self.current_positions),
+                        prices={},
+                    )
 
             # Get active instruments
             instruments = self.paper_cfg.get("trading", {}).get("instruments", ["BTC"])
@@ -189,13 +212,20 @@ class TradingSystem:
 
                 # 2. Calculate forecasts from each rule
                 rule_forecasts = {}
+                inst_forecast_values = {}
                 for rule_name, rule in self.rules.items():
+                    # For ML rules, set OHLCV data
+                    if hasattr(rule, "set_ohlcv"):
+                        rule.set_ohlcv(df)
                     fc = rule.forecast(prices)
                     rule_forecasts[rule_name] = fc
+                    inst_forecast_values[rule_name] = float(fc.iloc[-1])
                     logger.info(
                         f"  {rule_name}: forecast={fc.iloc[-1]:.1f} "
                         f"(avg_abs={fc.abs().mean():.1f})"
                     )
+
+                self.last_forecasts[instrument] = inst_forecast_values
 
                 if not rule_forecasts:
                     logger.warning(f"No forecasts for {instrument}")
@@ -283,8 +313,37 @@ class TradingSystem:
                             f"TRADE: {side} {abs(trade_size):.6f} {instrument} "
                             f"@ {trade_result.filled_price:.2f}"
                         )
+
+                        # Log trade
+                        self.trade_logger.log_trade(
+                            instrument=instrument,
+                            symbol=symbol,
+                            side=side,
+                            size=abs(trade_size),
+                            price=latest_price,
+                            filled_price=trade_result.filled_price,
+                            forecast=current_forecast,
+                            volatility=vol,
+                            target_pos=target_pos,
+                            buffered_pos=buffered_pos,
+                            success=True,
+                        )
                     else:
                         logger.error(f"Trade failed: {trade_result.error_message}")
+                        self.trade_logger.log_trade(
+                            instrument=instrument,
+                            symbol=symbol,
+                            side=side,
+                            size=abs(trade_size),
+                            price=latest_price,
+                            filled_price=0,
+                            forecast=current_forecast,
+                            volatility=vol,
+                            target_pos=target_pos,
+                            buffered_pos=buffered_pos,
+                            success=False,
+                            error=trade_result.error_message or "unknown",
+                        )
                 else:
                     logger.info(f"No trade needed for {instrument} (change {trade_size:.6f} < min {min_size})")
                     self.current_positions[symbol] = current_pos
@@ -300,25 +359,43 @@ class TradingSystem:
                     "trade_result": trade_result,
                     "price": latest_price,
                     "risk_reasons": risk_reasons if should_reduce else [],
+                    "rule_forecasts": inst_forecast_values,
                 }
 
+            # Log run summary
+            run_duration = (datetime.now(timezone.utc) - run_start).total_seconds()
+            self.trade_logger.log_run({
+                "equity": run_equity,
+                "positions": dict(self.current_positions),
+                "prices": {k: v for k, v in latest_prices.items()},
+                "forecasts": self.last_forecasts,
+                "kill_switch": self.risk_manager.kill_switch_active,
+                "duration_seconds": run_duration,
+                "instruments_traded": list(results.keys()),
+            })
+
             # Save state
-            self._save_state()
+            self._save_state(equity=run_equity, prices=latest_prices)
+            self.last_run_ts = run_ts
 
         finally:
             await self.exchange.disconnect()
 
         return results
 
-    def _save_state(self) -> None:
+    def _save_state(self, equity: float = 0, prices: dict | None = None) -> None:
         """Persist system state to JSON."""
         self.state_file.parent.mkdir(parents=True, exist_ok=True)
         state = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "positions": self.current_positions,
             "capital": self.capital,
+            "equity": equity,
             "kill_switch": self.risk_manager.kill_switch_active,
             "peak_equity": self.risk_manager.peak_equity,
+            "daily_start_equity": self.risk_manager.daily_start_equity,
+            "prices": prices or {},
+            "last_forecasts": self.last_forecasts,
         }
         with open(self.state_file, "w") as f:
             json.dump(state, f, indent=2, default=str)
@@ -331,6 +408,7 @@ class TradingSystem:
             self.current_positions = state.get("positions", {})
             self.risk_manager.peak_equity = state.get("peak_equity", 0)
             self.risk_manager.kill_switch_active = state.get("kill_switch", False)
+            self.last_forecasts = state.get("last_forecasts", {})
             logger.info(f"Loaded state: {len(self.current_positions)} positions")
 
     def run(self) -> dict:
