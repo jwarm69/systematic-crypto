@@ -59,6 +59,15 @@ rules:
     enabled: true
     phase: 2
 
+  # Phase 4: ML-enhanced forecast (own group - partially uncorrelated with rules)
+  ml_forecast:
+    type: "ml_forecast"
+    n_cv_splits: 4
+    n_optuna_trials: 30
+    feature_selection_k: 25
+    enabled: true               # Phase 4 gate passed
+    phase: 4
+
 # Forecast scaling parameters (Carver standard)
 forecast_scaling:
   cap: 20                 # Max absolute forecast

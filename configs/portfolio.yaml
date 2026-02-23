@@ -30,17 +30,18 @@ instrument_weights:
 # Computed from BTC/ETH/SOL return correlations on 1187 hourly bars
 idm: 1.049
 
-# Forecast weights (Phase 2: handcrafted from correlation grouping)
-# Groups: [ewmac_32_128, momentum] (trend-slow), [ewmac_8_32, ewmac_16_64, breakout_80] (trend-fast)
+# Forecast weights (Phase 4: systematic rules + ML at 15% weight)
+# ML gets 15% weight, systematic rules scaled to 85% of Phase 2 weights
 forecast_weights:
-  ewmac_32_128: 0.3333
-  momentum: 0.3333
-  ewmac_8_32: 0.1111
-  ewmac_16_64: 0.1111
-  breakout_80: 0.1111
+  ewmac_32_128: 0.2833
+  momentum: 0.2833
+  ewmac_8_32: 0.0944
+  ewmac_16_64: 0.0944
+  breakout_80: 0.0944
+  ml_forecast: 0.1500
 
 # Forecast Diversification Multiplier
-# Phase 2: computed from 5-rule forecast correlation matrix
+# Phase 4: updated with 6 rules including ML (low correlation with systematic)
 fdm: 1.305
 
 # Cost parameters

@@ -115,6 +115,13 @@ class TradingSystem:
                     lookback=cfg.get("lookback", 20),
                     z_cap=cfg.get("z_cap", 3.0),
                 )
+            elif rule_type == "ml_forecast":
+                from ..rules.ml_forecast import MLForecastRule
+                rules[rule_name] = MLForecastRule(
+                    n_cv_splits=cfg.get("n_cv_splits", 4),
+                    n_optuna_trials=cfg.get("n_optuna_trials", 30),
+                    feature_selection_k=cfg.get("feature_selection_k", 25),
+                )
         return rules
 
     async def _refresh_positions_from_exchange(self, instruments: list[str]) -> None:
