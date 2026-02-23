@@ -19,14 +19,16 @@ position:
   buffer_fraction: 0.10     # 10% no-trade buffer (Carver standard)
   kelly_fraction: 0.5       # Half Kelly (never full)
 
-# Instrument weights (Phase 1: BTC only)
+# Instrument weights (Phase 3: equal weights across 3 instruments)
 instrument_weights:
-  BTC: 1.0
+  BTC: 0.3333
+  ETH: 0.3333
+  SOL: 0.3333
 
 # Instrument Diversification Multiplier
-# Phase 1: 1 instrument -> IDM = 1.0
-# Phase 3: 3 instruments -> IDM ~1.5-1.7 (calculated from correlation)
-idm: 1.0
+# Phase 3: 3 instruments with crypto correlations ~0.85-0.89 -> IDM ~1.05
+# Computed from BTC/ETH/SOL return correlations on 1187 hourly bars
+idm: 1.049
 
 # Forecast weights (Phase 2: handcrafted from correlation grouping)
 # Groups: [ewmac_32_128, momentum] (trend-slow), [ewmac_8_32, ewmac_16_64, breakout_80] (trend-fast)

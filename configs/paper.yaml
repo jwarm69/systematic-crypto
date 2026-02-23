@@ -10,7 +10,7 @@ exchange:
 
 trading:
   mode: "paper"                # paper or live
-  instruments: ["BTC"]         # Phase 1: BTC only
+  instruments: ["BTC", "ETH", "SOL"]  # Phase 3: multi-instrument
   timeframe: "1h"              # Primary timeframe
 
 schedule:
